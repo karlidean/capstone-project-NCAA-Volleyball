@@ -25,6 +25,13 @@ NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 DOCS_DIR = PROJECT_ROOT / "docs"
 
+# Input and Output Files
+CONFERENCES_FILE = RAW_DATA_DIR / "conferences.csv"
+SCHOOL_MEMBERSHIP_FILE = RAW_DATA_DIR / "school_conference_membership.csv"
+SCHOOLS_FILE = RAW_DATA_DIR / "schools.csv"
+ROSTERS_FILE = RAW_DATA_DIR / "rosters.csv"
+COLLECTION_LOG_FILE = OUTPUTS_DIR / "collection_log.csv"
+
 ####################################
 # Data Collection
 ####################################
