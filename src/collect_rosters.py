@@ -243,7 +243,7 @@ def main() -> None:
     log_records: list[dict] = []
 
     for _, school in schools_df.iterrows():
-        for season in [2024]:
+        for season in range(START_YEAR, END_YEAR + 1):
             url = build_roster_url(school["roster_url_template"], season)
 
         try:
