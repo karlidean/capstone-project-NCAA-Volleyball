@@ -14,6 +14,7 @@ SOURCE_COLUMNS = [
     "athletics_domain",
     "roster_url_template",
     "platform",
+    "season_format",
 ]
 
 
@@ -68,6 +69,7 @@ def enrich_school_catalog(
         "athletics_domain",
         "roster_url_template",
         "platform",
+        "season_format",
     ]
 
     schools_df = schools_df.drop(
@@ -85,9 +87,13 @@ def enrich_school_catalog(
         validate="one_to_one",
     )
 
-    enriched_df["platform"] = enriched_df["platform"].fillna(
-        "unknown"
-    )
+    enriched_df["season_format"] = (
+        enriched_df["season_format"]
+        .fillna("calendar_year")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+)
 
     return enriched_df
 
