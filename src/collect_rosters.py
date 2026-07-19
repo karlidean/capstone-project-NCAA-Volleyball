@@ -1,126 +1,142 @@
 """
-collect_rosters.py
+Collect NCAA women's volleyball roster data.
 
-Collect NCAA women's volleyball rosters from university athletics websites.
+Input:
+    data/interim/roster_sources.csv
+
+Outputs:
+    data/raw/rosters.csv
+    outputs/collection_log.csv
 """
 
-########################
-# Imports
-########################
+from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import (
+    UTC,
+    datetime,
+)
+
 import time
 import traceback
 
 import pandas as pd
 import requests
 
+from src.collectors import (
+    extract_roster,
+)
+
+from src.collectors.browser import (
+    fetch_rendered_page,
+)
+
 from src.collectors.visible_text import (
     extract_compact_text_roster,
 )
-from src.collectors import extract_roster
-from src.collectors.browser import fetch_rendered_page
-from src.collectors.visible_text import extract_compact_text_roster
+
 from src.config import (
     COLLECTION_LOG_FILE,
     HEADERS,
     REQUEST_DELAY,
+    REQUEST_TIMEOUT,
     ROSTERS_FILE,
-    SCHOOLS_FILE,
+    ROSTER_SOURCES_FILE,
 )
 
 
-########################
-# Test Settings
-########################
+############################
+# Settings
+############################
 
 TEST_MODE = True
 
-TEST_SCHOOL_CODES = [
-    "indiana",
-    "iowa",
-    "penn_state",
-]
-
-TEST_SEASONS = [2024]
+TEST_LIMIT = 10
 
 
-########################
-# School Loading
-########################
+############################
+# Source loading
+############################
 
 
-def load_schools() -> pd.DataFrame:
-    """Load active schools that have configured roster URLs."""
+def load_roster_sources(
+) -> pd.DataFrame:
+    """
+    Load successfully discovered roster URLs.
+    """
 
-    schools_df = pd.read_csv(SCHOOLS_FILE)
-
-    active_values = (
-        schools_df["active"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
+    sources_df = pd.read_csv(
+        ROSTER_SOURCES_FILE
     )
 
-    schools_df = schools_df[
-        active_values == "true"
-    ].copy()
+    required_columns = {
+        "SCHOOL_NAME_OFFICIAL",
+        "DIVISION",
+        "CONFERENCE_CODE",
+        "PRIMARY_CONFERENCE",
+        "season",
+        "status",
+        "roster_url",
+    }
 
-    schools_df = schools_df[
-        schools_df["roster_url_template"].notna()
-        & (
-            schools_df["roster_url_template"]
-            .astype(str)
-            .str.strip()
-            .ne("")
+    missing_columns = (
+        required_columns
+        - set(
+            sources_df.columns
         )
+    )
+
+    if missing_columns:
+        raise ValueError(
+            "roster_sources.csv is missing "
+            "required columns: "
+            + ", ".join(
+                sorted(
+                    missing_columns
+                )
+            )
+        )
+
+    sources_df = sources_df[
+        sources_df[
+            "status"
+        ].astype(
+            str
+        ).str.lower()
+        == "found"
     ].copy()
 
-    return schools_df
+    sources_df = sources_df[
+        sources_df[
+            "roster_url"
+        ].notna()
+    ].copy()
+
+    if TEST_MODE:
+        sources_df = (
+            sources_df.head(
+                TEST_LIMIT
+            )
+        )
+
+    return sources_df
 
 
-########################
-# URL Construction
-########################
+############################
+# Page fetching
+############################
 
 
-def build_roster_url(
-    template: str,
-    season: int,
-    season_format: str = "calendar_year",
+def fetch_static_html(
+    url: str,
 ) -> str:
-    """Build a roster URL using the school's season format."""
-
-    normalized_format = (
-        str(season_format)
-        .strip()
-        .lower()
-    )
-
-    if normalized_format == "academic_year":
-        next_year = str(season + 1)[-2:]
-        season_url = f"{season}-{next_year}"
-    else:
-        season_url = str(season)
-
-    return str(template).format(
-        season=season,
-        season_url=season_url,
-    )
-
-
-########################
-# Page Collection
-########################
-
-
-def fetch_static_html(url: str) -> str:
-    """Download a webpage using requests and return its HTML."""
+    """
+    Fetch webpage HTML using requests.
+    """
 
     response = requests.get(
         url,
         headers=HEADERS,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT,
     )
 
     response.raise_for_status()
@@ -128,156 +144,231 @@ def fetch_static_html(url: str) -> str:
     return response.text
 
 
-########################
+############################
 # Metadata
-########################
+############################
 
 
 def add_metadata(
     roster_df: pd.DataFrame,
     *,
     school_name: str,
-    school_code: str,
     division: str,
-    conference: str,
+    conference_code: str,
+    primary_conference: str,
     season: int,
     source_url: str,
 ) -> pd.DataFrame:
-    """Add school, season, and source metadata to roster records."""
+    """
+    Add school and collection metadata
+    to roster records.
+    """
 
-    roster_df = roster_df.copy()
+    roster_df = (
+        roster_df.copy()
+    )
 
-    roster_df["school_name"] = school_name
-    roster_df["school_code"] = school_code
-    roster_df["division"] = division
-    roster_df["conference"] = conference
-    roster_df["season"] = season
-    roster_df["source_url"] = source_url
-    roster_df["collected_at"] = datetime.now(UTC).isoformat()
+    roster_df[
+        "school_name"
+    ] = school_name
+
+    roster_df[
+        "division"
+    ] = division
+
+    roster_df[
+        "conference_code"
+    ] = conference_code
+
+    roster_df[
+        "primary_conference"
+    ] = primary_conference
+
+    roster_df[
+        "season"
+    ] = season
+
+    roster_df[
+        "source_url"
+    ] = source_url
+
+    roster_df[
+        "collected_at"
+    ] = datetime.now(
+        UTC
+    ).isoformat()
 
     return roster_df
 
 
-########################
-# Roster Collection
-########################
+############################
+# One roster collection
+############################
 
 
-def collect_school_season(
-    school: pd.Series,
-    season: int,
-) -> tuple[pd.DataFrame, str, str, str]:
+def collect_roster(
+    source: pd.Series,
+) -> tuple[
+    pd.DataFrame,
+    str,
+    str,
+]:
     """
-    Collect one roster for one school and season.
+    Collect and parse one roster URL.
 
     Returns:
-        A tuple containing:
-        - standardized roster DataFrame;
-        - parser name;
-        - source URL;
-        - fetch method.
+        roster dataframe,
+        parser used,
+        fetch method
     """
 
-    url = build_roster_url(
-        school["roster_url_template"],
-        season,
-        school.get("season_format", "calendar_year"),
+    url = source[
+        "roster_url"
+    ]
+
+    school_name = source[
+        "SCHOOL_NAME_OFFICIAL"
+    ]
+
+    season = int(
+        source["season"]
     )
 
     print(
-        f"\nCollecting {school['school_name']} "
-        f"({season}): {url}"
+        "\nCollecting "
+        f"{school_name} "
+        f"({season})"
     )
 
-    platform = school.get("platform", "unknown")
+    print(
+        url
+    )
 
-    # First attempt: fast static HTML request.
-    static_html = fetch_static_html(url)
+    ########################
+    # Attempt 1:
+    # Static requests HTML
+    ########################
+
+    static_error = None
 
     try:
-        roster_df, parser_used = extract_roster(
-            static_html,
-            platform=platform,
+        static_html = (
+            fetch_static_html(
+                url
+            )
         )
 
-        fetch_method = "requests"
-
-    except ValueError as static_error:
-        print(
-            "Static HTML did not contain a usable roster. "
-            "Retrying with Chromium..."
-        )
-
-        # This assignment must occur before rendered_page is used.
-        rendered_page = fetch_rendered_page(url)
-
-        for line in rendered_page.visible_text.splitlines():
-            if "Madi Sell" in line:
-                print("MADI LINE:", repr(line))
-
-        debug_dir = ROSTERS_FILE.parent / "debug_text"
-
-        debug_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        debug_path = (
-            debug_dir
-            / f"{school['school_code']}_{season}.txt"
-        )
-
-        debug_path.write_text(
-            rendered_page.visible_text,
-            encoding="utf-8",
-        )
-
-        print(f"Saved rendered text to: {debug_path}")
-
-        # First try the visible-text parser.
         try:
-            roster_df = extract_compact_text_roster(
-                rendered_page.visible_text
+            (
+                roster_df,
+                parser_used,
+            ) = extract_roster(
+                static_html,
+                platform="unknown",
             )
 
-            parser_used = "compact_visible_text"
-            fetch_method = "playwright"
+            fetch_method = (
+                "requests"
+            )
+
+        except ValueError as error:
+            static_error = error
+            raise
+
+    except Exception as error:
+        static_error = error
+
+        print(
+            "Static collection "
+            "did not produce a usable "
+            "roster. Trying Playwright."
+        )
+
+        ########################
+        # Attempt 2:
+        # Rendered browser page
+        ########################
+
+        rendered_page = (
+            fetch_rendered_page(
+                url
+            )
+        )
+
+        ########################
+        # Attempt 2a:
+        # Visible text parser
+        ########################
+
+        try:
+            roster_df = (
+                extract_compact_text_roster(
+                    rendered_page.visible_text
+                )
+            )
+
+            parser_used = (
+                "compact_visible_text"
+            )
+
+            fetch_method = (
+                "playwright_visible_text"
+            )
 
         except ValueError as text_error:
-            # If visible text fails, try the regular parsers
-            # against the rendered HTML.
+
+            ####################
+            # Attempt 2b:
+            # Rendered HTML
+            ####################
+
             try:
-                roster_df, parser_used = extract_roster(
+                (
+                    roster_df,
+                    parser_used,
+                ) = extract_roster(
                     rendered_page.html,
-                    platform=platform,
+                    platform="unknown",
                 )
 
-                fetch_method = "playwright"
+                fetch_method = (
+                    "playwright_html"
+                )
 
-            except ValueError as rendered_html_error:
+            except ValueError as (
+                rendered_error
+            ):
                 raise ValueError(
-                    "Roster parsing failed after all collection methods. "
-                    f"Static HTML: {static_error} | "
-                    f"Visible text: {text_error} | "
-                    f"Rendered HTML: {rendered_html_error} | "
-                    f"Rendered text saved to: {debug_path}"
-                ) from rendered_html_error
+                    "All roster parsing "
+                    "methods failed. "
+                    f"Static: "
+                    f"{static_error} | "
+                    f"Visible text: "
+                    f"{text_error} | "
+                    f"Rendered HTML: "
+                    f"{rendered_error}"
+                ) from rendered_error
 
     print(
-        f"Extracted {len(roster_df)} players "
-        f"using the {parser_used} parser "
-        f"with {fetch_method}."
+        f"Extracted "
+        f"{len(roster_df)} "
+        f"players using "
+        f"{parser_used} "
+        f"via {fetch_method}."
     )
 
     roster_df = add_metadata(
         roster_df,
-        school_name=school["school_name"],
-        school_code=school["school_code"],
-        division=school.get("division", "DI"),
-        conference=school.get(
-            "current_conference_code",
-            pd.NA,
-        ),
+        school_name=school_name,
+        division=source[
+            "DIVISION"
+        ],
+        conference_code=source[
+            "CONFERENCE_CODE"
+        ],
+        primary_conference=source[
+            "PRIMARY_CONFERENCE"
+        ],
         season=season,
         source_url=url,
     )
@@ -285,33 +376,39 @@ def collect_school_season(
     return (
         roster_df,
         parser_used,
-        url,
         fetch_method,
     )
 
 
-########################
-# File Saving
-########################
+############################
+# Save outputs
+############################
 
 
 def save_rosters(
-    rosters: list[pd.DataFrame],
+    rosters: list[
+        pd.DataFrame
+    ],
 ) -> None:
-    """Combine and save successfully collected rosters."""
+    """
+    Save successfully parsed rosters.
+    """
 
-    nonempty_rosters = [
-        roster_df
-        for roster_df in rosters
-        if not roster_df.empty
+    nonempty = [
+        roster
+        for roster in rosters
+        if not roster.empty
     ]
 
-    if not nonempty_rosters:
-        print("\nNo roster records were collected.")
+    if not nonempty:
+        print(
+            "\nNo roster records "
+            "were collected."
+        )
         return
 
     combined_df = pd.concat(
-        nonempty_rosters,
+        nonempty,
         ignore_index=True,
     )
 
@@ -326,144 +423,194 @@ def save_rosters(
     )
 
     print(
-        f"\nSaved {len(combined_df)} roster records to:"
+        "\nSaved "
+        f"{len(combined_df)} "
+        "roster records to:"
     )
-    print(ROSTERS_FILE)
+
+    print(
+        ROSTERS_FILE
+    )
 
 
 def save_collection_log(
-    log_records: list[dict],
+    records: list[dict],
 ) -> None:
-    """Save collection successes and failures."""
-
-    if not log_records:
-        print("No collection-log entries were generated.")
-        return
+    """
+    Save collection successes
+    and failures.
+    """
 
     COLLECTION_LOG_FILE.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    log_df = pd.DataFrame(log_records)
-
-    log_df.to_csv(
+    pd.DataFrame(
+        records
+    ).to_csv(
         COLLECTION_LOG_FILE,
         index=False,
     )
 
     print(
-        f"Saved {len(log_df)} collection-log entries to:"
+        "\nSaved collection log to:"
     )
-    print(COLLECTION_LOG_FILE)
+
+    print(
+        COLLECTION_LOG_FILE
+    )
 
 
-########################
-# Main Pipeline
-########################
+############################
+# Main
+############################
 
 
 def main() -> None:
-    """Collect roster data for configured schools and seasons."""
+    """
+    Run roster collection pipeline.
+    """
 
-    schools_df = load_schools()
-
-    if TEST_MODE:
-        schools_df = schools_df[
-            schools_df["school_code"].isin(
-                TEST_SCHOOL_CODES
-            )
-        ].copy()
-
-        seasons = TEST_SEASONS
-
-        print(
-            "Running in test mode for schools: "
-            f"{TEST_SCHOOL_CODES}"
-        )
-
-    else:
-        seasons = list(
-            range(2018, 2027)
-        )
-
-    print(
-        f"Configured active schools loaded: "
-        f"{len(schools_df)}"
+    sources_df = (
+        load_roster_sources()
     )
 
-    collected_rosters: list[pd.DataFrame] = []
-    log_records: list[dict] = []
+    print(
+        "Roster URLs loaded: "
+        f"{len(sources_df)}"
+    )
 
-    for _, school in schools_df.iterrows():
-        for season in seasons:
-            url = build_roster_url(
-                school["roster_url_template"],
-                season,
-                school.get(
-                    "season_format",
-                    "calendar_year",
-                ),
+    if TEST_MODE:
+        print(
+            "Running in TEST_MODE "
+            f"with first "
+            f"{TEST_LIMIT} URLs."
+        )
+
+    collected_rosters: list[
+        pd.DataFrame
+    ] = []
+
+    log_records: list[
+        dict
+    ] = []
+
+    for _, source in (
+        sources_df.iterrows()
+    ):
+        school_name = source[
+            "SCHOOL_NAME_OFFICIAL"
+        ]
+
+        season = int(
+            source["season"]
+        )
+
+        url = source[
+            "roster_url"
+        ]
+
+        try:
+            (
+                roster_df,
+                parser_used,
+                fetch_method,
+            ) = collect_roster(
+                source
             )
 
-            try:
-                (
-                    roster_df,
-                    parser_used,
-                    url,
-                    fetch_method,
-                ) = collect_school_season(
-                    school,
-                    season,
-                )
+            collected_rosters.append(
+                roster_df
+            )
 
-                collected_rosters.append(
-                    roster_df
-                )
+            log_records.append(
+                {
+                    "school_name":
+                        school_name,
+                    "division":
+                        source[
+                            "DIVISION"
+                        ],
+                    "conference_code":
+                        source[
+                            "CONFERENCE_CODE"
+                        ],
+                    "season":
+                        season,
+                    "source_url":
+                        url,
+                    "status":
+                        "success",
+                    "record_count":
+                        len(
+                            roster_df
+                        ),
+                    "parser_used":
+                        parser_used,
+                    "fetch_method":
+                        fetch_method,
+                    "error":
+                        "",
+                }
+            )
 
-                log_records.append(
-                    {
-                        "school_name": school["school_name"],
-                        "school_code": school["school_code"],
-                        "season": season,
-                        "source_url": url,
-                        "status": "success",
-                        "record_count": len(roster_df),
-                        "parser_used": parser_used,
-                        "error": "",
-                        "fetch_method": fetch_method,
-                    }
-                )
+        except Exception as error:
+            print(
+                "\nFailed: "
+                f"{school_name} "
+                f"({season})"
+            )
 
-            except Exception as error:
-                print(
-                    f"Failed: {school['school_name']} "
-                    f"({season}): {error}"
-                )
+            print(
+                error
+            )
 
-                traceback.print_exc()
+            traceback.print_exc()
 
-                log_records.append(
-                    {
-                        "school_name": school["school_name"],
-                        "school_code": school["school_code"],
-                        "season": season,
-                        "source_url": url,
-                        "status": "failed",
-                        "record_count": 0,
-                        "parser_used": "",
-                        "error": (
+            log_records.append(
+                {
+                    "school_name":
+                        school_name,
+                    "division":
+                        source[
+                            "DIVISION"
+                        ],
+                    "conference_code":
+                        source[
+                            "CONFERENCE_CODE"
+                        ],
+                    "season":
+                        season,
+                    "source_url":
+                        url,
+                    "status":
+                        "failed",
+                    "record_count":
+                        0,
+                    "parser_used":
+                        "",
+                    "fetch_method":
+                        "",
+                    "error":
+                        (
                             f"{type(error).__name__}: "
                             f"{error}"
                         ),
-                        "fetch_method": "",
-                    }
-                )
+                }
+            )
 
-            time.sleep(REQUEST_DELAY)
+        time.sleep(
+            REQUEST_DELAY
+        )
 
-    save_rosters(collected_rosters)
-    save_collection_log(log_records)
+    save_rosters(
+        collected_rosters
+    )
+
+    save_collection_log(
+        log_records
+    )
 
 
 if __name__ == "__main__":
