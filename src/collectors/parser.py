@@ -7,6 +7,7 @@ import pandas as pd
 from src.collectors.common import validate_roster
 from src.collectors.sidearm import extract_sidearm_roster
 from src.collectors.tables import extract_table_roster
+from src.collectors.modern_cards import extract_modern_card_roster
 from src.collectors.labeled_cards import (
     extract_labeled_card_roster,
 )
@@ -18,8 +19,9 @@ from src.collectors.visible_text import (
 RosterParser = Callable[[str], pd.DataFrame]
 
 
-PARSERS: dict[str, RosterParser] = {
+PARSERS = {
     "table": extract_table_roster,
+    "modern_cards": extract_modern_card_roster,
     "labeled_cards": extract_labeled_card_roster,
     "sidearm": extract_sidearm_roster,
 }
@@ -37,6 +39,7 @@ PLATFORM_PRIORITY: dict[str, list[str]] = {
     ],
     "unknown": [
         "table",
+        "modern_cards",
         "labeled_cards",
         "sidearm",
     ],

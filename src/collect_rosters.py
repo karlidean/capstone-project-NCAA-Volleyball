@@ -1,8 +1,15 @@
 """
-Collect NCAA women's volleyball roster data.
+Collect NCAA women's volleyball roster data directly from curated roster URLs.
 
 Input:
-    data/interim/roster_sources.csv
+    data/raw/school_list.csv
+
+Required columns:
+    CONFERENCE_CODE
+    DIVISION
+    PRIMARY_CONFERENCE
+    SCHOOL_NAME_OFFICIAL
+    SITE
 
 Outputs:
     data/raw/rosters.csv
@@ -11,28 +18,16 @@ Outputs:
 
 from __future__ import annotations
 
-from datetime import (
-    UTC,
-    datetime,
-)
-
+from datetime import UTC, datetime
 import time
 import traceback
 
 import pandas as pd
 import requests
 
-from src.collectors import (
-    extract_roster,
-)
-
-from src.collectors.browser import (
-    fetch_rendered_page,
-)
-
-from src.collectors.visible_text import (
-    extract_compact_text_roster,
-)
+from src.collectors import extract_roster
+from src.collectors.browser import fetch_rendered_page
+from src.collectors.visible_text import extract_compact_text_roster
 
 from src.config import (
     COLLECTION_LOG_FILE,
@@ -40,85 +35,79 @@ from src.config import (
     REQUEST_DELAY,
     REQUEST_TIMEOUT,
     ROSTERS_FILE,
-    ROSTER_SOURCES_FILE,
+    SCHOOL_LIST_FILE,
 )
 
 
 ############################
-# Settings
+# Test settings
 ############################
 
-TEST_MODE = True
-
-TEST_LIMIT = 10
+TEST_MODE = False
+TEST_LIMIT = 20
 
 
 ############################
-# Source loading
+# Load roster sources
 ############################
 
 
-def load_roster_sources(
-) -> pd.DataFrame:
-    """
-    Load successfully discovered roster URLs.
-    """
+def load_roster_sources() -> pd.DataFrame:
+    """Load schools with curated roster URLs."""
 
-    sources_df = pd.read_csv(
-        ROSTER_SOURCES_FILE
+    schools_df = pd.read_csv(
+        SCHOOL_LIST_FILE,
+        encoding="utf-8-sig",
+    )
+
+    # Clean Excel/CSV column-name weirdness.
+    schools_df.columns = (
+        schools_df.columns
+        .astype(str)
+        .str.strip()
+        .str.replace("\ufeff", "", regex=False)
     )
 
     required_columns = {
-        "SCHOOL_NAME_OFFICIAL",
-        "DIVISION",
         "CONFERENCE_CODE",
+        "DIVISION",
         "PRIMARY_CONFERENCE",
-        "season",
-        "status",
-        "roster_url",
+        "SCHOOL_NAME_OFFICIAL",
+        "SITE",
     }
 
     missing_columns = (
         required_columns
-        - set(
-            sources_df.columns
-        )
+        - set(schools_df.columns)
     )
 
     if missing_columns:
         raise ValueError(
-            "roster_sources.csv is missing "
-            "required columns: "
-            + ", ".join(
-                sorted(
-                    missing_columns
-                )
-            )
+            "school_list.csv is missing required columns: "
+            + ", ".join(sorted(missing_columns))
         )
 
-    sources_df = sources_df[
-        sources_df[
-            "status"
-        ].astype(
-            str
-        ).str.lower()
-        == "found"
+    # Keep only rows with a URL.
+    schools_df = schools_df[
+        schools_df["SITE"].notna()
     ].copy()
 
-    sources_df = sources_df[
-        sources_df[
-            "roster_url"
-        ].notna()
+    schools_df["SITE"] = (
+        schools_df["SITE"]
+        .astype(str)
+        .str.strip()
+    )
+
+    schools_df = schools_df[
+        schools_df["SITE"].ne("")
     ].copy()
 
     if TEST_MODE:
-        sources_df = (
-            sources_df.head(
-                TEST_LIMIT
-            )
+        schools_df = schools_df.head(
+            TEST_LIMIT
         )
 
-    return sources_df
+    return schools_df
 
 
 ############################
@@ -129,14 +118,13 @@ def load_roster_sources(
 def fetch_static_html(
     url: str,
 ) -> str:
-    """
-    Fetch webpage HTML using requests.
-    """
+    """Fetch roster page with requests."""
 
     response = requests.get(
         url,
         headers=HEADERS,
         timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
     )
 
     response.raise_for_status()
@@ -156,53 +144,43 @@ def add_metadata(
     division: str,
     conference_code: str,
     primary_conference: str,
-    season: int,
     source_url: str,
 ) -> pd.DataFrame:
-    """
-    Add school and collection metadata
-    to roster records.
-    """
+    """Add school and collection metadata."""
 
-    roster_df = (
-        roster_df.copy()
+    roster_df = roster_df.copy()
+
+    roster_df["school_name"] = (
+        school_name
     )
 
-    roster_df[
-        "school_name"
-    ] = school_name
+    roster_df["division"] = (
+        division
+    )
 
-    roster_df[
-        "division"
-    ] = division
+    roster_df["conference_code"] = (
+        conference_code
+    )
 
-    roster_df[
-        "conference_code"
-    ] = conference_code
+    roster_df["primary_conference"] = (
+        primary_conference
+    )
 
-    roster_df[
-        "primary_conference"
-    ] = primary_conference
+    roster_df["source_url"] = (
+        source_url
+    )
 
-    roster_df[
-        "season"
-    ] = season
-
-    roster_df[
-        "source_url"
-    ] = source_url
-
-    roster_df[
-        "collected_at"
-    ] = datetime.now(
-        UTC
-    ).isoformat()
+    roster_df["collected_at"] = (
+        datetime.now(
+            UTC
+        ).isoformat()
+    )
 
     return roster_df
 
 
 ############################
-# One roster collection
+# Collect one roster
 ############################
 
 
@@ -212,44 +190,42 @@ def collect_roster(
     pd.DataFrame,
     str,
     str,
+    str,
 ]:
     """
-    Collect and parse one roster URL.
+    Collect and parse one roster.
 
     Returns:
-        roster dataframe,
+        roster DataFrame,
         parser used,
-        fetch method
+        fetch method,
+        final source URL
     """
 
-    url = source[
-        "roster_url"
-    ]
+    school_name = str(
+        source[
+            "SCHOOL_NAME_OFFICIAL"
+        ]
+    ).strip()
 
-    school_name = source[
-        "SCHOOL_NAME_OFFICIAL"
-    ]
+    url = str(
+        source["SITE"]
+    ).strip()
 
-    season = int(
-        source["season"]
+    print(
+        "\n"
+        f"Collecting: {school_name}"
     )
 
     print(
-        "\nCollecting "
-        f"{school_name} "
-        f"({season})"
+        f"URL: {url}"
     )
-
-    print(
-        url
-    )
-
-    ########################
-    # Attempt 1:
-    # Static requests HTML
-    ########################
 
     static_error = None
+
+    ############################
+    # Attempt 1: requests
+    ############################
 
     try:
         static_html = (
@@ -271,117 +247,103 @@ def collect_roster(
                 "requests"
             )
 
+            return (
+                roster_df,
+                parser_used,
+                fetch_method,
+                url,
+            )
+
         except ValueError as error:
             static_error = error
-            raise
 
     except Exception as error:
         static_error = error
 
-        print(
-            "Static collection "
-            "did not produce a usable "
-            "roster. Trying Playwright."
+    print(
+        "Static HTML did not produce "
+        "a usable roster."
+    )
+
+    print(
+        "Trying Playwright..."
+    )
+
+    ############################
+    # Attempt 2: Playwright
+    ############################
+
+    rendered_page = (
+        fetch_rendered_page(
+            url
         )
+    )
 
-        ########################
-        # Attempt 2:
-        # Rendered browser page
-        ########################
+    ############################
+    # Attempt 2A:
+    # Visible-text parser
+    ############################
 
-        rendered_page = (
-            fetch_rendered_page(
-                url
+    try:
+        roster_df = (
+            extract_compact_text_roster(
+                rendered_page.visible_text
             )
         )
 
+        parser_used = (
+            "compact_visible_text"
+        )
+
+        fetch_method = (
+            "playwright_visible_text"
+        )
+
+        return (
+            roster_df,
+            parser_used,
+            fetch_method,
+            url,
+        )
+
+    except ValueError as text_error:
+
         ########################
-        # Attempt 2a:
-        # Visible text parser
+        # Attempt 2B:
+        # Rendered HTML parsers
         ########################
 
         try:
-            roster_df = (
-                extract_compact_text_roster(
-                    rendered_page.visible_text
-                )
-            )
-
-            parser_used = (
-                "compact_visible_text"
+            (
+                roster_df,
+                parser_used,
+            ) = extract_roster(
+                rendered_page.html,
+                platform="unknown",
             )
 
             fetch_method = (
-                "playwright_visible_text"
+                "playwright_html"
             )
 
-        except ValueError as text_error:
+            return (
+                roster_df,
+                parser_used,
+                fetch_method,
+                url,
+            )
 
-            ####################
-            # Attempt 2b:
-            # Rendered HTML
-            ####################
-
-            try:
-                (
-                    roster_df,
-                    parser_used,
-                ) = extract_roster(
-                    rendered_page.html,
-                    platform="unknown",
-                )
-
-                fetch_method = (
-                    "playwright_html"
-                )
-
-            except ValueError as (
-                rendered_error
-            ):
-                raise ValueError(
-                    "All roster parsing "
-                    "methods failed. "
-                    f"Static: "
-                    f"{static_error} | "
-                    f"Visible text: "
-                    f"{text_error} | "
-                    f"Rendered HTML: "
-                    f"{rendered_error}"
-                ) from rendered_error
-
-    print(
-        f"Extracted "
-        f"{len(roster_df)} "
-        f"players using "
-        f"{parser_used} "
-        f"via {fetch_method}."
-    )
-
-    roster_df = add_metadata(
-        roster_df,
-        school_name=school_name,
-        division=source[
-            "DIVISION"
-        ],
-        conference_code=source[
-            "CONFERENCE_CODE"
-        ],
-        primary_conference=source[
-            "PRIMARY_CONFERENCE"
-        ],
-        season=season,
-        source_url=url,
-    )
-
-    return (
-        roster_df,
-        parser_used,
-        fetch_method,
-    )
+        except ValueError as rendered_error:
+            raise ValueError(
+                "All roster parsing methods failed. "
+                f"Static: {static_error} | "
+                f"Visible text: {text_error} | "
+                f"Rendered HTML: {rendered_error}"
+            ) from rendered_error
 
 
 ############################
-# Save outputs
+# Save results
 ############################
 
 
@@ -390,17 +352,15 @@ def save_rosters(
         pd.DataFrame
     ],
 ) -> None:
-    """
-    Save successfully parsed rosters.
-    """
+    """Save successfully collected rosters."""
 
-    nonempty = [
+    nonempty_rosters = [
         roster
         for roster in rosters
         if not roster.empty
     ]
 
-    if not nonempty:
+    if not nonempty_rosters:
         print(
             "\nNo roster records "
             "were collected."
@@ -408,7 +368,7 @@ def save_rosters(
         return
 
     combined_df = pd.concat(
-        nonempty,
+        nonempty_rosters,
         ignore_index=True,
     )
 
@@ -436,19 +396,18 @@ def save_rosters(
 def save_collection_log(
     records: list[dict],
 ) -> None:
-    """
-    Save collection successes
-    and failures.
-    """
+    """Save collection successes and failures."""
 
     COLLECTION_LOG_FILE.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    pd.DataFrame(
+    log_df = pd.DataFrame(
         records
-    ).to_csv(
+    )
+
+    log_df.to_csv(
         COLLECTION_LOG_FILE,
         index=False,
     )
@@ -463,29 +422,26 @@ def save_collection_log(
 
 
 ############################
-# Main
+# Main pipeline
 ############################
 
 
 def main() -> None:
-    """
-    Run roster collection pipeline.
-    """
+    """Run roster collection."""
 
     sources_df = (
         load_roster_sources()
     )
 
     print(
-        "Roster URLs loaded: "
+        "\nRoster URLs loaded: "
         f"{len(sources_df)}"
     )
 
     if TEST_MODE:
         print(
-            "Running in TEST_MODE "
-            f"with first "
-            f"{TEST_LIMIT} URLs."
+            "TEST MODE enabled. "
+            f"Testing first {TEST_LIMIT} URLs."
         )
 
     collected_rosters: list[
@@ -496,28 +452,59 @@ def main() -> None:
         dict
     ] = []
 
-    for _, source in (
-        sources_df.iterrows()
+    total = len(
+        sources_df
+    )
+
+    for index, (
+        _,
+        source,
+    ) in enumerate(
+        sources_df.iterrows(),
+        start=1,
     ):
-        school_name = source[
-            "SCHOOL_NAME_OFFICIAL"
-        ]
+        school_name = str(
+            source[
+                "SCHOOL_NAME_OFFICIAL"
+            ]
+        ).strip()
 
-        season = int(
-            source["season"]
+        url = str(
+            source["SITE"]
+        ).strip()
+
+        print(
+            "\n"
+            f"[{index}/{total}]"
         )
-
-        url = source[
-            "roster_url"
-        ]
 
         try:
             (
                 roster_df,
                 parser_used,
                 fetch_method,
+                final_url,
             ) = collect_roster(
                 source
+            )
+
+            roster_df = add_metadata(
+                roster_df,
+                school_name=school_name,
+                division=str(
+                    source["DIVISION"]
+                ),
+                conference_code=str(
+                    source[
+                        "CONFERENCE_CODE"
+                    ]
+                ),
+                primary_conference=str(
+                    source[
+                        "PRIMARY_CONFERENCE"
+                    ]
+                ),
+                source_url=final_url,
             )
 
             collected_rosters.append(
@@ -536,10 +523,8 @@ def main() -> None:
                         source[
                             "CONFERENCE_CODE"
                         ],
-                    "season":
-                        season,
                     "source_url":
-                        url,
+                        final_url,
                     "status":
                         "success",
                     "record_count":
@@ -555,15 +540,23 @@ def main() -> None:
                 }
             )
 
+            print(
+                "SUCCESS: "
+                f"{len(roster_df)} "
+                "players | "
+                f"{parser_used} | "
+                f"{fetch_method}"
+            )
+
         except Exception as error:
             print(
-                "\nFailed: "
-                f"{school_name} "
-                f"({season})"
+                "\nFAILED: "
+                f"{school_name}"
             )
 
             print(
-                error
+                f"{type(error).__name__}: "
+                f"{error}"
             )
 
             traceback.print_exc()
@@ -580,8 +573,6 @@ def main() -> None:
                         source[
                             "CONFERENCE_CODE"
                         ],
-                    "season":
-                        season,
                     "source_url":
                         url,
                     "status":
@@ -600,6 +591,11 @@ def main() -> None:
                 }
             )
 
+        # Save progress after every school.
+        save_collection_log(
+            log_records
+        )
+
         time.sleep(
             REQUEST_DELAY
         )
@@ -610,6 +606,10 @@ def main() -> None:
 
     save_collection_log(
         log_records
+    )
+
+    print(
+        "\nCollection complete."
     )
 
 
