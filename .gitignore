@@ -30,7 +30,6 @@ dist/
 # Data
 data/raw/*
 data/interim/*
-data/processed/*
 
 # Keep folder structure
 !data/raw/.gitkeep
